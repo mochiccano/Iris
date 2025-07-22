@@ -9,9 +9,10 @@ env_file = "configs/.env"
 
 config_file = "configs/config.json"
 instructions_file = "configs/instructions.txt"
+instructions_auxiliary_file = "configs/instructions_auxiliary.txt"
 
-memory_file = "data/history.json"
-memory_file_long = "data/memory.json"
+chat_log_file = "data/history.json"
+memory_file = "data/memory.json"
 emotion_state_file = "data/emotion.json"
 
 
@@ -52,12 +53,13 @@ default_config = {
         "image_processing": False,
         "gemini_model_main": "gemini-2.5-pro",
         "gemini_model_fallback": "gemini-2.5-flash",
-        "gemini_model_auxiliary": "gemini-2.5-flash-lite-preview-06-17"
+        "gemini_model_auxiliary": "gemini-2.5-flash-lite-preview-06-17",
+        "gemini_model_embedding": "gemini-embedding-001"
     },
     "file_locations": {
         "instructions": instructions_file,
+        "history": chat_log_file,
         "memory": memory_file,
-        "memory_long": memory_file_long,
         "emotion_state": emotion_state_file
     },
     "id_list": {
@@ -284,8 +286,8 @@ class App(customtkinter.CTk):
 
 
         # Data
-        json_initialize(memory_file_long, [])
         json_initialize(memory_file, [])
+        json_initialize(chat_log_file, [])
         json_initialize(emotion_state_file, default_emotion)
 
         self.root.destroy()

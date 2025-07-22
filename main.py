@@ -1,36 +1,33 @@
 import asyncio
 import os
 import sys
+import shutil
 import discord
 import json
-import shutil
 import uuid
 import time
 import aiohttp
 import subprocess
 import aiofiles
+import chromadb
 
-from google.genai.types import TunedModel
-from pydantic import BaseModel, conlist
+from pydantic import BaseModel
 from typing import Literal, Optional
-
 from datetime import datetime
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 
+from chromadb import Documents, EmbeddingFunction, Embeddings
 
+
+
+# Variables/Configs
 if not os.path.exists("configs/.env"):
     subprocess.run([sys.executable, 'gui.py'])
 
-intents = discord.Intents.all()
-load_dotenv("configs/.env")
-bot = discord.Bot(intents=intents)
-
-gemini_api_key = os.getenv('GOOGLE_API_KEY')
 
 config_file = "configs/config.json"
 
@@ -38,27 +35,27 @@ with open (config_file, "r") as f:
     config_list = json.load(f)
 
 locations_list = config_list["file_locations"]
-locations_keys = ["instructions", "memory", "memory_long", "emotion_state"]
-instructions_file, memory_file, memory_file_long, emotion_state_file = map(locations_list.__getitem__, locations_keys)
-
+locations_keys = ["instructions", "instructions_auxiliary", "history", "memory", "emotion_state"]
+instructions_file, instructions_auxiliary_file, chat_log_file, memory_file, emotion_state_file = map(locations_list.__getitem__, locations_keys)
 
 id_list = config_list["id_list"]
 keys = ["message_channel", "log_channel", "self_id", "owner_id", "self_name"]
 message_channel, log_channel_id, self_id, owner_id, self_name = map(id_list.__getitem__, keys)
 
-
 settings_list = config_list["settings"]
-settings_key = ["image_processing", "gemini_model_main", "gemini_model_fallback", "gemini_model_auxiliary"]
-image_processing, gemini_model_main, gemini_model_fallback, gemini_model_auxiliary = map(settings_list.__getitem__, settings_key)
-
+settings_key = ["image_processing", "gemini_model_main", "gemini_model_fallback", "gemini_model_auxiliary", "gemini_model_embedding"]
+image_processing, gemini_model_main, gemini_model_fallback, gemini_model_auxiliary, gemini_model_embedding = map(settings_list.__getitem__, settings_key)
 
 name_list = config_list["name_list"]
 
 
-with open(instructions_file, 'r', encoding="utf-8") as file:
-    instructions_main = file.read()
+# Initializing
+intents = discord.Intents.all()
+load_dotenv("configs/.env")
+bot = discord.Bot(intents=intents)
 
 
+# Gemini variables/initialization
 use_fallback_model = False
 last_fallback_time = None
 gemini_overloaded = False
@@ -66,9 +63,43 @@ fallback_timeout = 21600
 fallback_timeout_overloaded = 60
 gemini_model_current = gemini_model_main
 
-gemini = genai.Client(api_key=gemini_api_key)
+gemini = genai.Client(api_key=os.getenv('GOOGLE_API_KEY'))
 
-# Connect to SQLite (will create jobs.sqlite if it doesn't exist)
+with open(instructions_file, 'r', encoding="utf-8") as file:
+    instructions_main = file.read()
+
+with open(instructions_auxiliary_file, 'r', encoding="utf-8") as file:
+    instructions_auxiliary = file.read()
+
+
+# ChromaDB initialization
+chroma = chromadb.PersistentClient(path="data/chroma")
+
+class GeminiEmbeddingFunction(EmbeddingFunction):
+    def __init__(self):
+        print("Initialized embedding function.")
+    # IDK what else to put here, the fucking thing wouldn't leave me alone without init
+
+    def __call__(self, memory: Documents) -> Embeddings:
+        result = gemini.models.embed_content(
+            model = gemini_model_embedding,
+            contents = memory,
+            config=types.EmbedContentConfig(output_dimensionality=768)
+        )
+
+        embeddings = [embedding.values for embedding in result.embeddings]
+        return embeddings
+
+gemini_embedding_function = GeminiEmbeddingFunction()
+
+# Create collections if they don't exist
+chroma_memory_self = chroma.get_or_create_collection(name="memory_self", embedding_function=gemini_embedding_function)
+chroma_memory_other = chroma.get_or_create_collection(name="memory_other", embedding_function=gemini_embedding_function)
+
+
+
+
+# Connect to SQLite and start APS
 jobstores = {
     'default': SQLAlchemyJobStore(url='sqlite:///data/jobs.sqlite')
 }
@@ -77,16 +108,27 @@ scheduler = BackgroundScheduler(jobstores=jobstores)
 scheduler.start()
 
 
+
 # Execute when online. Set custom status and send a log message.
 @bot.event
 async def on_ready():
-    print(f"logged in as {bot.user}")
+    print(f"Logged in as {bot.user}")
     log_ch = bot.get_channel(log_channel_id)
     game = discord.Game("with fire")
     await bot.change_presence(status=discord.Status.online, activity=game)
     await log_ch.send(f"Yahallo~ \nIris is up and running")
+    # Log self_id if it doesn't exist
+    if not config_list["id_list"]["self_id"]:
+        config_list["id_list"]["self_id"] = str(bot.user.id)
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(config_list, f, indent=4)
+        print("Self_id was not set. Setting it now.")
+        reload_config()
 
 
+
+
+# ____COMMANDS____
 # Ping command.
 @bot.command(description="sends the bot's latency.")
 async def ping(ctx):
@@ -124,10 +166,10 @@ async def purge(ctx):
         backup_file = os.path.join(backup_dir, f"memory_{timestamp}.json")
 
         # backup first
-        shutil.copy(memory_file, backup_file)
+        shutil.copy(chat_log_file, backup_file)
 
         # then reset by writing an empty array
-        with open(memory_file, "w", encoding='utf-8') as f:
+        with open(chat_log_file, "w", encoding='utf-8') as f:
             json.dump([], f, indent=4)
 
         await ctx.respond("done.\ngoodbye, old iris. welcome, new iris.")
@@ -141,17 +183,18 @@ async def purge(ctx):
 async def image(ctx):
     global image_processing
 
-    image_processing = not data["settings"]["image_processing"]
-    config_list["settings"]["image_processing"] = not data["settings"]["image_processing"]
+    image_processing = not config_list["settings"]["image_processing"]
+    config_list["settings"]["image_processing"] = not config_list["settings"]["image_processing"]
 
 
     with open(config_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
+        json.dump(config_list, f, indent=4)
 
-    if data["settings"]["image_processing"]:
+    if config_list["settings"]["image_processing"]:
         await ctx.respond(f'Done.\nImage processing has been enabled.')
-    if not data["settings"]["image_processing"]:
+    if not config_list["settings"]["image_processing"]:
         await ctx.respond(f'Done.\nImage processing has been disabled.')
+
 
 
 # Incoming message handling. Uses a list as a buffer for multiple messages.
@@ -176,13 +219,11 @@ async def on_message(message):
 
         if message.attachments:
             attachment_bool = True
-            print(message.attachments)
             for attachment in message.attachments:
                 if attachment.content_type.startswith("image/"):
                     if image_processing:
                         attachments_amount += 1
-                        ext = os.path.splitext(attachment.filename)[1]  # gets .jpg, .png, etc.
-                        print(ext)
+                        ext = os.path.splitext(attachment.filename)[1]  # Gets .jpg, .png, etc.
                         filename = f"downloads/image{ext}"
 
                         async with aiohttp.ClientSession() as session:
@@ -208,16 +249,14 @@ async def on_message(message):
             # Get name from id (from the .json)
             auth = f"{message.author.id}"
 
-
             name = name_list.get(auth, name_backup_b)
-
 
             # Prompt preparation
             prompt = message.content
             prompt_clean = prompt.replace(f'<@{self_id}>', '')
 
             message_buffer.append(prompt_clean.strip())
-            print(message_buffer)
+            # print(message_buffer)
 
             if response_task and not response_task.done():
                 response_task.cancel()
@@ -234,9 +273,27 @@ async def on_message(message):
 
 # Json output structure
 class Memory_Structure(BaseModel):
+    memory_self: Optional['Memory_Structure_Self'] = None
+    memory_other: Optional['Memory_Structure_Other'] = None
+
+class Memory_Structure_Self(BaseModel):
     sentiment: str
     fact: str
+
+class Memory_Structure_Other(BaseModel):
+    name: str
+    sentiment: str
+    fact_type: Literal[
+        "identity",
+        "interests",
+        "life_context",
+        "communication_style",
+        "other"
+    ]
+    fact: str
+    timestamp_iso: str
     last_topic: str
+
 
 class Reminder_Structure(BaseModel):
     event_time_iso: str
@@ -265,7 +322,6 @@ class Response_Structure(BaseModel):
     message: str
     required_action: Literal[
         "none",
-        "save_memory",
         "ask_user",
         "set_reminder",
         "set_reminder_recurring",
@@ -278,9 +334,26 @@ class Response_Structure(BaseModel):
     confidence_score: float
 
 
+# Auxiliary
+class Memory_Auxiliary(BaseModel):
+    memory_type: Literal[
+        "identity",
+        "interests",
+        "life_context",
+        "communication_style",
+        "other"
+    ]
+    query: str
+
+class Response_Structure_Auxiliary(BaseModel):
+    memory_query: Optional[Memory_Auxiliary] = None
+
+
+
 
 # Response generation and returning using Gemini.
 async def wait_and_respond(message, sender, sender_id, attachment, ext, attachments_amount):
+    await asyncio.sleep(3)
     global use_fallback_model, last_fallback_time, fallback_timeout, fallback_timeout_overloaded, gemini_model_current, gemini_overloaded
 
     log_channel = bot.get_channel(log_channel_id)
@@ -288,229 +361,278 @@ async def wait_and_respond(message, sender, sender_id, attachment, ext, attachme
     if not message_buffer:
         return
 
-    async with message.channel.typing():
-        combined_messages = "\n".join(message_buffer)
-        print(combined_messages)
 
-        # Get current time
-        current_time = datetime.now()
-        time_formatted = current_time.strftime("%a, %d/%m/%Y - %H:%M")
+    combined_messages = "\n".join(message_buffer)
 
-        chat_history = await read_data_async(memory_file)
+    # Get current time
+    current_time = datetime.now()
+    time_formatted = current_time.strftime("%a, %d/%m/%Y - %H:%M")
 
-        emotion_history = await read_data_async(emotion_state_file)
-        memory_emotion = emotion_history.get("previous_emotion")
+    chat_history = await read_data_async(chat_log_file)
 
-        prompt_main = {
-            "current_time": time_formatted,
-            "sender": sender,
-            "message": combined_messages,
-            "images": attachment,
-            "images_amount": attachments_amount,
-            "previous_emotional_state": memory_emotion,
-            "chat_history": chat_history
-        }
+    emotion_history = await read_data_async(emotion_state_file)
+    memory_emotion = emotion_history.get("previous_emotion")
 
-        prompt_main_str = json.dumps(prompt_main)
+    # Auxiliary prompt for memory retrieval
+    prompt_aux = {
+        "sender": sender,
+        "message": combined_messages,
+        "images": attachment,
+        "images_amount": attachments_amount,
+        "chat_history": chat_history
+    }
+
+    prompt_aux_str = json.dumps(prompt_aux)
+
+    response_aux = gemini.models.generate_content(
+        model=gemini_model_auxiliary,
+        config=types.GenerateContentConfig(
+            system_instruction=instructions_auxiliary,
+            temperature=1.2,
+            response_mime_type="application/json",
+            response_schema=Response_Structure_Auxiliary),
+        contents=prompt_aux_str)
 
 
-        # Check if the timeout is over
-        if use_fallback_model and not gemini_overloaded and time.time() - last_fallback_time > fallback_timeout:
-            use_fallback_model = False
+    response_aux_json = json.loads(response_aux.text)
+
+    if response_aux_json["memory_query"]:
+        query_result = chroma_memory_other.query(
+            query_texts = response_aux_json["memory_query"]["query"],
+            where = {"type": response_aux_json["memory_query"]["memory_type"]}
+        )
+    elif not response_aux_json["memory_query"]:
+        query_result = chroma_memory_other.get(
+            where = {"name": sender}
+        )
+
+    memories = [doc for group in query_result['documents'] for doc in group]
+
+
+
+    prompt_main = {
+        "current_time": time_formatted,
+        "sender": sender,
+        "message": combined_messages,
+        "images": attachment,
+        "images_amount": attachments_amount,
+        "previous_emotional_state": memory_emotion,
+        "related_memories": memories,
+        "chat_history": chat_history
+    }
+
+    print(prompt_main)
+
+    prompt_main_str = json.dumps(prompt_main)
+
+
+    # Check if the cooldown is over
+    if use_fallback_model and not gemini_overloaded and time.time() - last_fallback_time > fallback_timeout:
+        use_fallback_model = False
+        gemini_overloaded = False
+
+    if use_fallback_model and gemini_overloaded and time.time() - last_fallback_time > fallback_timeout_overloaded:
+        use_fallback_model = False
+        gemini_overloaded = False
+
+
+    if attachment and image_processing:
+        image = gemini.files.upload(file=f"downloads/image{ext}")
+    else:
+        image = None
+
+    contents = prompt_main_str if image is None else [image, prompt_main_str]
+
+    if not use_fallback_model:
+        gemini_model_current = gemini_model_main
+    else:
+        gemini_model_current = gemini_model_fallback
+
+    # Attempt to prompt using the main model, or fallback to the other model
+    try:
+        response = generate_response(contents)
+
+    # Fallback
+    except Exception as e:
+        if "429" in str(e).lower() or "resource_exhausted" in str(e).lower():
+            # Log the error and switch models
+            await log_channel.send(f"<@{owner_id}>\nQuota reached. Switching to fallback model.")
+            await log_channel.send(f"Error details: {str(e)}")
+            use_fallback_model = True
             gemini_overloaded = False
-
-        if use_fallback_model and gemini_overloaded and time.time() - last_fallback_time > fallback_timeout_overloaded:
-            use_fallback_model = False
-            gemini_overloaded = False
-
-
-        if attachment and image_processing:
-            image = gemini.files.upload(file=f"downloads/image{ext}")
-        else:
-            image = None
-
-        contents = prompt_main_str if image is None else [image, prompt_main_str]
-
-        if not use_fallback_model:
-            gemini_model_current = gemini_model_main
-        else:
+            last_fallback_time = time.time()
             gemini_model_current = gemini_model_fallback
 
-        # Attempt to prompt using the main model, or fallback to the other model
-        try:
-            response = gemini.models.generate_content(
-                model=gemini_model_current,
-                config=types.GenerateContentConfig(
-                    system_instruction=instructions_main,
-                    temperature=1.2,
-                    response_mime_type="application/json",
-                    response_schema=Response_Structure),
-                contents=contents)
+            response = generate_response(contents)
 
-        # Fallback
-        except Exception as e:
-            if "429" in str(e).lower() or "resource_exhausted" in str(e).lower():
-                # Log the error and switch models
-                await log_channel.send(f"<@{owner_id}>\nQuota reached. Switching to fallback model.")
-                await log_channel.send(f"Error details: {str(e)}")
-                use_fallback_model = True
-                gemini_overloaded = False
-                last_fallback_time = time.time()
-                gemini_model_current = gemini_model_fallback
+        elif "503" in str(e).lower():
+            await log_channel.send(f"<@{owner_id}>\nModel overloaded. Switching to fallback model.")
+            await log_channel.send(f"Error details: {str(e)}")
+            use_fallback_model = True
+            gemini_overloaded = True
+            last_fallback_time = time.time()
+            gemini_model_current = gemini_model_fallback
 
-                # Retry once with fallback model
-                response = gemini.models.generate_content(
-                    model=gemini_model_fallback,
-                    config=types.GenerateContentConfig(
-                        system_instruction=instructions_main,
-                        temperature=1.2,
-                        response_mime_type="application/json",
-                        response_schema=Response_Structure),
-                    contents=contents
-                )
-            elif "503" in str(e).lower():
-                await log_channel.send(f"<@{owner_id}>\nModel overloaded. Switching to fallback model.")
-                await log_channel.send(f"Error details: {str(e)}")
-                use_fallback_model = True
-                gemini_overloaded = True
-                last_fallback_time = time.time()
-                gemini_model_current = gemini_model_fallback
+            response = generate_response(contents)
 
-                # Retry once with fallback model
-                response = gemini.models.generate_content(
-                    model=gemini_model_fallback,
-                    config=types.GenerateContentConfig(
-                        system_instruction=instructions_main,
-                        temperature=1.2,
-                        response_mime_type="application/json",
-                        response_schema=Response_Structure),
-                    contents=contents
-                )
-
-            else:
-                print(e)
-                await log_channel.send(e)
+        else:
+            print(e)
+            await log_channel.send(e)
 
 
 
-        response_str = response.text
+    response_str = response.text
 
-        await log_channel.send(response_str)
-        await log_channel.send(f"--------------------------------------\nCurrent model: {gemini_model_current}\n--------------------------------------")
-
-
-        response_json = json.loads(response_str)
-
-        response_output = response_json["message"]
-
-        response_emotion = response_json["emotion_vad"]
+    await log_channel.send(response_str)
+    await log_channel.send(f"--------------------------------------\nCurrent model: {gemini_model_current}\n--------------------------------------")
 
 
-        # Responding
+    response_json = json.loads(response_str)
+
+    response_output = response_json["message"]
+
+    response_emotion = response_json["emotion_vad"]
+
+
+    # Responding
+    async with message.channel.typing():
+        await asyncio.sleep(3)
         await message.channel.send(response_output)
 
-        # Reminder handling
-        if response_json["required_action"] == "set_reminder":
-            schedule = response_json["reminder_details"]["event_time_iso"]
-            context = response_json["reminder_details"]["event_context"]
-            person = response_json["reminder_details"]["event_person"]
-            reminder_time = datetime.fromisoformat(schedule)
-            scheduler.add_job(
-                schedule_reminder,
-                trigger='date',
-                run_date=reminder_time,
-                kwargs={'user_id': sender_id, 'context': context, 'person': person})
 
-            print(f"job scheduled for {reminder_time}")
-            await log_channel.send(f"Reminder ```{context}``` scheduled for {reminder_time}.")
-
-
-        # Reminder handling (recurring)
-        if response_json["required_action"] == "set_reminder_recurring":
-            event_schedule_str = response_json["reminder_details_recurring"]["event_time_cron"]
-            event_person = response_json["reminder_details_recurring"]["event_person"]
-            event_type = response_json["reminder_details_recurring"]["event_type"]
-            event_context = response_json["reminder_details_recurring"]["event_context"]
-
-            event_schedule = json.loads(event_schedule_str)
-
-            event_id = str(uuid.uuid4())
-
-            recurring_event = {
-                "id": event_id,
-                "user_id": sender_id,
-                "name": event_person,
-                "type": event_type,
-                "schedule": event_schedule,
-                "context": event_context
-            }
-
-
-            # Add directly to APScheduler with persistence
-            scheduler.add_job(
-                schedule_reminder_recurring,
-                id=event_id,
-                trigger='cron',
-                **event_schedule,
-                kwargs={'id': event_id,'user_id': sender_id, 'name': event_person, 'type': event_type, 'context': event_context},
-                replace_existing=False
-            )
-
-            print(f"job scheduled with cron: {recurring_event}")
-
-
-        # Reminder handling (delete)
-        if response_json["required_action"] == "remove_reminder":
-            event_person = response_json["reminder_details_recurring"]["event_person"]
-            event_type = response_json["reminder_details_recurring"]["event_type"]
-            event_context = response_json["reminder_details_recurring"]["event_context"]
-
-            await remove_reminder(event_person, event_type, event_context)
+    # Embedding
+    if response_json["memory"]["memory_other"]:
+        print("Memory found")
+        chroma_memory_other.add(
+            ids = str(uuid.uuid4()),
+            documents = response_json["memory"]["memory_other"]["fact"],
+            metadatas = {"time": response_json["memory"]["memory_other"]["timestamp_iso"],
+                         "name": response_json["memory"]["memory_other"]["name"],
+                         "sentiment": response_json["memory"]["memory_other"]["sentiment"],
+                         "type": response_json["memory"]["memory_other"]["fact_type"]}
+        )
+        print(f"Memory added: {response_json['memory']['memory_other']['fact']}")
+        print(chroma_memory_other.peek())
 
 
 
 
 
-        # Saving chat history
-        chat_log = await read_data_async(memory_file)
+    # Reminder handling
+    if response_json["required_action"] == "set_reminder":
+        schedule = response_json["reminder_details"]["event_time_iso"]
+        context = response_json["reminder_details"]["event_context"]
+        person = response_json["reminder_details"]["event_person"]
+        reminder_time = datetime.fromisoformat(schedule)
+        scheduler.add_job(
+            schedule_reminder,
+            trigger='date',
+            run_date=reminder_time,
+            kwargs={'user_id': sender_id, 'context': context, 'person': person})
 
-        response_dict_input = {
-            "time": time_formatted,
-            "sender": sender,
-            "text": combined_messages
+        print(f"job scheduled for {reminder_time}")
+        await log_channel.send(f"Reminder ```{context}``` scheduled for {reminder_time}.")
+
+
+    # Reminder handling (recurring)
+    if response_json["required_action"] == "set_reminder_recurring":
+        event_schedule_str = response_json["reminder_details_recurring"]["event_time_cron"]
+        event_person = response_json["reminder_details_recurring"]["event_person"]
+        event_type = response_json["reminder_details_recurring"]["event_type"]
+        event_context = response_json["reminder_details_recurring"]["event_context"]
+
+        event_schedule = json.loads(event_schedule_str)
+
+        event_id = str(uuid.uuid4())
+
+        recurring_event = {
+            "id": event_id,
+            "user_id": sender_id,
+            "name": event_person,
+            "type": event_type,
+            "schedule": event_schedule,
+            "context": event_context
         }
 
-        response_dict_output = {
-            "time": datetime.now().strftime("%d/%m/%Y - %H:%M"),
-            "sender": self_name,
-            "text": response_output
-        }
 
-        chat_log.append(response_dict_input)
-        chat_log.append(response_dict_output)
+        # Add directly to APScheduler with persistence
+        scheduler.add_job(
+            schedule_reminder_recurring,
+            id=event_id,
+            trigger='cron',
+            **event_schedule,
+            kwargs={'id': event_id,'user_id': sender_id, 'name': event_person, 'type': event_type, 'context': event_context},
+            replace_existing=False
+        )
 
-        with open(memory_file, "w", encoding="utf-8") as f:
-            json.dump(chat_log, f, indent=4)
-
-        # Saving last emotion state
-        last_emotion = {
-            "previous_emotion": response_emotion
-        }
-
-        with open(emotion_state_file, "w", encoding="utf-8") as f:
-            json.dump(last_emotion, f, indent=4)
+        print(f"job scheduled with cron: {recurring_event}")
 
 
-        # Empty downloads folder
-        folder = "downloads"
+    # Reminder handling (delete)
+    if response_json["required_action"] == "remove_reminder":
+        event_person = response_json["reminder_details_recurring"]["event_person"]
+        event_type = response_json["reminder_details_recurring"]["event_type"]
+        event_context = response_json["reminder_details_recurring"]["event_context"]
 
-        for filename in os.listdir(folder):
-            file_path = os.path.join(folder, filename)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
+        await remove_reminder(event_person, event_type, event_context)
 
 
-        message_buffer.clear()
+
+
+
+    # Saving chat history
+    chat_log = await read_data_async(chat_log_file)
+
+    response_dict_input = {
+        "time": time_formatted,
+        "sender": sender,
+        "text": combined_messages
+    }
+
+    response_dict_output = {
+        "time": datetime.now().strftime("%d/%m/%Y - %H:%M"),
+        "sender": self_name,
+        "text": response_output
+    }
+
+    chat_log.append(response_dict_input)
+    chat_log.append(response_dict_output)
+
+    with open(chat_log_file, "w", encoding="utf-8") as f:
+        json.dump(chat_log, f, indent=4)
+
+    # Saving last emotion state
+    last_emotion = {
+        "previous_emotion": response_emotion
+    }
+
+    with open(emotion_state_file, "w", encoding="utf-8") as f:
+        json.dump(last_emotion, f, indent=4)
+
+
+    # Empty downloads folder
+    folder = "downloads"
+
+    for filename in os.listdir(folder):
+        file_path = os.path.join(folder, filename)
+        if os.path.isfile(file_path):
+            os.remove(file_path)
+
+
+    message_buffer.clear()
+
+
+# Response generation
+def generate_response(contents):
+    response = gemini.models.generate_content(
+        model=gemini_model_current,
+        config=types.GenerateContentConfig(
+            system_instruction=instructions_main,
+            temperature=1.2,
+            response_mime_type="application/json",
+            response_schema=Response_Structure),
+        contents=contents)
+    return response
 
 
 # When a reminder is triggered
@@ -521,7 +643,7 @@ async def reminder(user_id, context, person):
 
     emotion_history = await read_data_async(emotion_state_file)
     memory_emotion = emotion_history.get("previous_emotion")
-    chat_history = await read_data_async(memory_file)
+    chat_history = await read_data_async(chat_log_file)
 
     prompt_main = {
         "message": f"The time is up for this reminder: {context}. This person(s):{person} is involved. Please respond accordingly. Ping the user with '<@{user_id}>' instead of calling their name. Do not acknowledge this message.",
@@ -531,14 +653,16 @@ async def reminder(user_id, context, person):
 
     prompt_main_str = json.dumps(prompt_main)
 
-    response = gemini.models.generate_content(
-        model=gemini_model_current,
-        config=types.GenerateContentConfig(
-            system_instruction=instructions_main,
-            temperature=1.2,
-            response_mime_type="application/json",
-            response_schema=Response_Structure),
-        contents=prompt_main_str)
+    try:
+        response = generate_response(prompt_main_str)
+    except:
+        # Fallback to the fallback model if the main model fails
+        global use_fallback_model, last_fallback_time, gemini_model_current
+        use_fallback_model = True
+        last_fallback_time = time.time()
+        gemini_model_current = gemini_model_fallback
+
+        response = generate_response(prompt_main_str)
 
     response_str = response.text
 
@@ -565,7 +689,7 @@ async def reminder_recurring(id, user_id, name, type=None, context=None):
 
     emotion_history = await read_data_async(emotion_state_file)
     memory_emotion = emotion_history.get("previous_emotion")
-    chat_history = await read_data_async(memory_file)
+    chat_history = await read_data_async(chat_log_file)
 
     prompt_main = {
         "message": f"The time is up for this '{type}' event reminder: {context} \nThis/These people are involved in this event:{name}\n. Please respond accordingly. Ping the user with '<@{user_id}>' instead of calling their name. Do not acknowledge this message.",
@@ -575,14 +699,16 @@ async def reminder_recurring(id, user_id, name, type=None, context=None):
 
     prompt_main_str = json.dumps(prompt_main)
 
-    response = gemini.models.generate_content(
-        model=gemini_model_current,
-        config=types.GenerateContentConfig(
-            system_instruction=instructions_main,
-            temperature=1.2,
-            response_mime_type="application/json",
-            response_schema=Response_Structure),
-        contents=prompt_main_str)
+    try:
+        response = generate_response(prompt_main_str)
+    except:
+        # Fallback to the fallback model if the main model fails
+        global use_fallback_model, last_fallback_time, gemini_model_current
+        use_fallback_model = True
+        last_fallback_time = time.time()
+        gemini_model_current = gemini_model_fallback
+
+        response = generate_response(prompt_main_str)
 
     response_str = response.text
 
@@ -676,6 +802,8 @@ def reload_config():
     name_list = config_list["name_list"]
     locations_list = config_list["file_locations"]
     id_list = config_list["id_list"]
+    print("Config reloaded.")
+
 
 # Read data files (async)
 async def read_data_async(path):
@@ -686,8 +814,6 @@ async def read_data_async(path):
 
 for job in scheduler.get_jobs():
     print(f"job id: {job.id}, trigger: {job.trigger}, next run: {job.next_run_time}")
-
-    # If you passed additional info with kwargs:
     print(f"job kwargs: {job.kwargs}")
 
 
