@@ -8,3 +8,4 @@ apscheduler
 sqlalchemy
 customtkinter
 chromadb
+audioop-lts
