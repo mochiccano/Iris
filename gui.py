@@ -242,13 +242,13 @@ class App(customtkinter.CTk):
                     f.write(default_instructions)
 
         else:
-            instructions_final = f"    * Instructions:\n    " + instructions + f"\n\n" + default_instructions
+            instructions_final = f"    * Instructions:\n    " + instructions
             os.makedirs(os.path.dirname(instructions_file), exist_ok=True)
             with open(instructions_file, "w", encoding="utf-8") as f:
                 f.write(instructions_final)
 
 
-        os.makedirs(os.path.dirname("downloads"), exist_ok=True)
+        os.makedirs("downloads", exist_ok=True)
 
         # Variables
         if not os.path.exists(env_file):
@@ -272,7 +272,7 @@ class App(customtkinter.CTk):
         json_initialize(chat_log_file, [])
         json_initialize(emotion_state_file, default_emotion)
 
-        self.root.destroy()
+        self.destroy()
 
 
     @staticmethod
