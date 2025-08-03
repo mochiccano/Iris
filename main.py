@@ -35,8 +35,8 @@ with open (config_file, "r") as f:
     config_list = json.load(f)
 
 locations_list = config_list["file_locations"]
-locations_keys = ["instructions", "instruction_system", "instructions_auxiliary", "history", "memory", "emotion_state"]
-instructions_file, instructions_system_file,instructions_auxiliary_file, chat_log_file, memory_file, emotion_state_file = map(locations_list.__getitem__, locations_keys)
+locations_keys = ["instructions", "instructions_system", "instructions_auxiliary", "history", "memory", "emotion_state"]
+instructions_file, instructions_system_file, instructions_auxiliary_file, chat_log_file, memory_file, emotion_state_file = map(locations_list.__getitem__, locations_keys)
 
 id_list = config_list["id_list"]
 keys = ["message_channel", "log_channel", "self_id", "owner_id", "self_name"]
