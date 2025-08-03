@@ -9,6 +9,7 @@ env_file = "configs/.env"
 
 config_file = "configs/config.json"
 instructions_file = "configs/instructions.txt"
+instructions_system_file = "configs/instructions_system.txt"
 instructions_auxiliary_file = "configs/instructions_auxiliary.txt"
 
 chat_log_file = "data/history.json"
@@ -16,28 +17,7 @@ memory_file = "data/memory.json"
 emotion_state_file = "data/emotion.json"
 
 
-default_instructions = """    * Things to note:
-    You are operating in a Discord server, therefore other people might be able to join in your conversations. Be mindful of the "sender" in the given prompt.
-    Keep your messages under 2000 characters.
-
-
-    * Reminders:
-      There are two main types of reminders. One-time and recurring.
-      For one-time reminders, provide the time in a machine-readable ISO8601 string (2025-06-17T15:54:54+0:00).
-      For recurring reminders such as birthdays and anniversaries, provide the time in a machine-readable cron dict . Use any of the following fields:
-      {
-      "year",         # optional
-      "month",        # 1-12
-      "day",          # 1-31      ← NOT "day_of_month"
-      "week",         # 1-53
-      "day_of_week",  # 0-6 or "mon"-"sun"
-      "hour",         # 0-23
-      "minute",       # 0-59
-      "second",       # 0-59
-      }
-      For reminder deletion requests, provide the time (in either cron or ISO format depending on the type or reminder), the name of the person involved, and the closest match of the reminder context.
-
-"""
+default_instructions = """You're Iris, a personal digital assistant."""
 
 
 default_emotion = {
@@ -58,6 +38,8 @@ default_config = {
     },
     "file_locations": {
         "instructions": instructions_file,
+        "instructions_system": instructions_system_file,
+        "instructions_auxiliary": instructions_auxiliary_file,
         "history": chat_log_file,
         "memory": memory_file,
         "emotion_state": emotion_state_file
