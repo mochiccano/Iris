@@ -170,7 +170,7 @@ class App(customtkinter.CTk):
         # Log channel input
         self.input_label_log = customtkinter.CTkLabel(
             self,
-            text="Message channel ID:",
+            text="Log channel ID (for error logging and handling):",
             font=("comfortaa", 16)
         )
         self.input_label_log.grid(row=9, column=0, padx=10, pady=0, sticky="nw")
@@ -181,7 +181,7 @@ class App(customtkinter.CTk):
         # Message channel input
         self.input_label_message = customtkinter.CTkLabel(
             self,
-            text="Log channel ID (for error logging and handling):",
+            text="Message channel ID",
             font=("comfortaa", 16)
         )
         self.input_label_message.grid(row=9, column=1, padx=10, pady=(10, 0), sticky="nw")
