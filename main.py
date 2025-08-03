@@ -35,8 +35,8 @@ with open (config_file, "r") as f:
     config_list = json.load(f)
 
 locations_list = config_list["file_locations"]
-locations_keys = ["instructions", "instructions_auxiliary", "history", "memory", "emotion_state"]
-instructions_file, instructions_auxiliary_file, chat_log_file, memory_file, emotion_state_file = map(locations_list.__getitem__, locations_keys)
+locations_keys = ["instructions", "instruction_system", "instructions_auxiliary", "history", "memory", "emotion_state"]
+instructions_file, instructions_system_file,instructions_auxiliary_file, chat_log_file, memory_file, emotion_state_file = map(locations_list.__getitem__, locations_keys)
 
 id_list = config_list["id_list"]
 keys = ["message_channel", "log_channel", "self_id", "owner_id", "self_name"]
@@ -67,6 +67,11 @@ gemini = genai.Client(api_key=os.getenv('GOOGLE_API_KEY'))
 
 with open(instructions_file, 'r', encoding="utf-8") as file:
     instructions_main = file.read()
+
+with open (instructions_system_file, 'r', encoding="utf-8") as file:
+    instructions_system = file.read()
+
+instructions_complete = instructions_main + f"\n\n" + instructions_system
 
 with open(instructions_auxiliary_file, 'r', encoding="utf-8") as file:
     instructions_auxiliary = file.read()
@@ -627,7 +632,7 @@ def generate_response(contents):
     response = gemini.models.generate_content(
         model=gemini_model_current,
         config=types.GenerateContentConfig(
-            system_instruction=instructions_main,
+            system_instruction=instructions_complete,
             temperature=1.2,
             response_mime_type="application/json",
             response_schema=Response_Structure),
@@ -763,7 +768,7 @@ async def remove_reminder(user, event_type, event_context):
     response = gemini.models.generate_content(
         model=gemini_model_auxiliary,
         config=types.GenerateContentConfig(
-            system_instruction=instructions_main,
+            system_instruction=instructions_complete,
             temperature=1.2,
             response_mime_type="application/json",
             response_schema=Event_Removal),
