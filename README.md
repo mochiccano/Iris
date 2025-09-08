@@ -1,2 +1,2 @@
 # Iris
-Discord LLM chatbot based on Google Gemma 3. Currently under active development.
+Discord LLM chatbot powered by Google Gemma 3. Currently under active development.
